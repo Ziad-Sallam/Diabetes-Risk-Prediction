@@ -6,6 +6,7 @@ import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.tensorboard import SummaryWriter
 import os
 import json
 
@@ -18,7 +19,7 @@ BATCH_SIZE = 64
 LR = 0.0005
 EPOCHS = 40
 imbalance_methods = ['oversampling', 'undersampling', 'SMOTE', None]
-feature_selection_methods = [ 'automatic']
+feature_selection_methods = ['automatic']
 ks = [15, 18, 20, 21]
 
 # ---------------------------
@@ -50,10 +51,15 @@ class DiabetesNN(nn.Module):
 for imbalance_method in imbalance_methods:
     for feature_selection_method in feature_selection_methods:
         for k in ks:
-            MODEL_SAVE_PATH = f'models/{imbalance_method}_{feature_selection_method}_{k}/diabetes_nn_model_best_{imbalance_method}_{feature_selection_method}_{k}.pth'
-            METRICS_SAVE_PATH = f'models/{imbalance_method}_{feature_selection_method}_{k}/diabetes_metrics_{imbalance_method}_{feature_selection_method}_{k}.json'
+
+            MODEL_SAVE_PATH = f'models1/{imbalance_method}_{feature_selection_method}_{k}/diabetes_nn_model_best_{imbalance_method}_{feature_selection_method}_{k}.pth'
+            METRICS_SAVE_PATH = f'models1/{imbalance_method}_{feature_selection_method}_{k}/diabetes_metrics_{imbalance_method}_{feature_selection_method}_{k}.json'
+
             print(f"Using device: {DEVICE}")
             os.makedirs(os.path.dirname(METRICS_SAVE_PATH), exist_ok=True)
+
+            log_dir = f"runs/{imbalance_method}_{feature_selection_method}_{k}"
+            writer = SummaryWriter(log_dir)
 
             # ---------------------------
             # Load datasets
@@ -82,11 +88,10 @@ for imbalance_method in imbalance_methods:
             train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=BATCH_SIZE, shuffle=True)
             val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=BATCH_SIZE)
 
-
             model = DiabetesNN(input_size).to(DEVICE)
 
             # ---------------------------
-            # Class Weights for Imbalance
+            # Class Weights
             # ---------------------------
             class_weights = compute_class_weight(
                 class_weight='balanced',
@@ -99,25 +104,36 @@ for imbalance_method in imbalance_methods:
             optimizer = optim.AdamW(model.parameters(), lr=LR)
 
             # ---------------------------
-            # Training Loop with Best Macro F1 Saving
+            # Training Loop
             # ---------------------------
             best_macro_f1 = 0.0
+            global_step = 0
 
             for epoch in range(EPOCHS):
                 model.train()
                 total_loss = 0
+
                 for X_batch, y_batch in train_loader:
                     X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
+
                     optimizer.zero_grad()
                     outputs = model(X_batch)
                     loss = criterion(outputs, y_batch)
+
                     loss.backward()
                     optimizer.step()
+
                     total_loss += loss.item()
 
+                    writer.add_scalar("Loss/train_step", loss.item(), global_step)
+                    global_step += 1
+
+                # ---------------------------
                 # Validation
+                # ---------------------------
                 model.eval()
                 preds_val, true_val = [], []
+
                 with torch.no_grad():
                     for X_batch, y_batch in val_loader:
                         X_batch = X_batch.to(DEVICE)
@@ -128,12 +144,20 @@ for imbalance_method in imbalance_methods:
 
                 val_acc = accuracy_score(true_val, preds_val)
                 val_macro_f1 = f1_score(true_val, preds_val, average="macro")
+
                 print(f"Epoch {epoch+1}/{EPOCHS} | Loss {total_loss:.3f} | Val Acc {val_acc:.4f} | Val Macro F1 {val_macro_f1:.4f}")
+
+                writer.add_scalar("Loss/train_epoch", total_loss, epoch)
+                writer.add_scalar("Accuracy/val", val_acc, epoch)
+                writer.add_scalar("F1_macro/val", val_macro_f1, epoch)
 
                 # Save best model
                 if val_macro_f1 > best_macro_f1:
                     best_macro_f1 = val_macro_f1
                     torch.save(model.state_dict(), MODEL_SAVE_PATH)
+
+                    writer.add_scalar("Best/F1_macro", best_macro_f1, epoch)
+
                     print(f"Saved new best model at epoch {epoch+1} with Macro F1 {best_macro_f1:.4f}")
 
             # ---------------------------
@@ -141,6 +165,7 @@ for imbalance_method in imbalance_methods:
             # ---------------------------
             model.load_state_dict(torch.load(MODEL_SAVE_PATH))
             model.eval()
+
             with torch.no_grad():
                 outputs = model(X_test.to(DEVICE))
                 preds = torch.argmax(outputs, dim=1).cpu().numpy()
@@ -156,8 +181,10 @@ for imbalance_method in imbalance_methods:
             print("Micro F1:", micro_f1)
             print("Macro F1:", macro_f1)
             print("Weighted F1:", weighted_f1)
-            print("\nClassification Report:\n", classification_report(y_test, preds))
-            print("\nConfusion Matrix:\n", conf_matrix)
+
+            writer.add_scalar("Test/accuracy", accuracy, 0)
+            writer.add_scalar("Test/macro_f1", macro_f1, 0)
+            writer.add_scalar("Test/weighted_f1", weighted_f1, 0)
 
             # ---------------------------
             # Save metrics
@@ -173,5 +200,8 @@ for imbalance_method in imbalance_methods:
 
             with open(METRICS_SAVE_PATH, "w") as f:
                 json.dump(metrics, f, indent=4)
+
             print(f"Metrics saved to {METRICS_SAVE_PATH}")
             print(f"Best model saved to {MODEL_SAVE_PATH}")
+
+            writer.close()
